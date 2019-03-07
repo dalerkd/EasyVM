@@ -21,7 +21,11 @@
 #define D_SIZE 100
 
 
-enum OPCODE { END = 0x66, ADD, SUB, MUL, DIV, INC, DEC, XOR, AND, PUSH, PUSHD, POP, MOV, MOVD, MOV2D, LOOP, CMP, JL, JG, JZ, INCD, DECD, FUN };
+enum OPCODE
+{
+	END = 0x66, ADD, SUB, MUL, DIV, INC, DEC, XOR, AND, PUSH, PUSHD, POP, MOV, MOVD, MOV2D, LOOP, CMP, JL, JG, JZ, INCD, DECD, FUN,
+	CALL = 0xe8,RET=0xc3
+};
 
 struct REG {
 	unsigned int r0;
@@ -42,6 +46,7 @@ private:
 	virtual unsigned int vmp_gets();
 	virtual void vmp_setd(unsigned int x);
 	virtual void vmc_nop();
+	virtual void vmc_ud();
 	virtual void vmc_add();
 	virtual void vmc_sub();
 	virtual void vmc_mul();
@@ -64,6 +69,8 @@ private:
 	virtual void vmc_incd();
 	virtual void vmc_decd();
 	virtual void vmc_fun();
+	virtual void vmc_call();
+	virtual void vmc_ret();
 public:
 #ifdef DEBUG
 	virtual void vm_debug();
@@ -181,6 +188,13 @@ void VM::vmc_nop() {
 	printf("%s", "NOP\n");
 #endif
 }
+void VM::vmc_ud(){
+	
+#ifdef DEBUG
+	printf("UnDefine Instruction:%x,Address:%p",*(r.ip),r.ip);
+#endif
+	*(r.ip) = END;//使过程结束
+}
 
 void VM::vmc_add() {
 	vmp_setd(vmp_getd() + vmp_gets());
@@ -281,7 +295,7 @@ void VM::vmc_pushd() {
 	*(r.sp) = buf;
 	r.ip += 5;
 #ifdef DEBUG
-	printf("PUSHD $%x\n", buf);
+	printf("PUSHD $0x%X\n", buf);
 	vm_debug();
 #endif
 }
@@ -458,6 +472,32 @@ void VM::vmc_fun() {
 #endif
 }
 
+void VM::vmc_call()
+{
+	r.sp -= 2;
+	*(r.sp) = (unsigned int)(r.ip + 5);//将返回地址写入esp
+
+	/*
+		解释,call后面是一个偏移 ,偏移的起始地址是当前call范围内	
+	*/
+	int i = (*(int*)(r.ip + 1));
+	r.ip = i + 5 + r.ip;
+#ifdef DEBUG
+	printf("CALL +%X\n", i);
+	vm_debug();
+#endif
+}
+void VM::vmc_ret()
+{
+	r.ip = (unsigned char*)*r.sp;
+	r.sp += 2;
+#ifdef DEBUG
+	printf("RET ->0x%p\n",r.ip);
+	vm_debug();
+#endif
+}
+
+
 void VM::vm_run() {
 #ifdef DEBUG
 	printf("%s", "VM::vm_run\n");
@@ -538,8 +578,15 @@ void VM::vm_run() {
 		case FUN:
 			vmc_fun();
 			break;
+		case CALL:
+			vmc_call();
+			break;
+		case RET:
+			vmc_ret();
+			break;
 		default:
-			vmc_nop();
+			vmc_ud();
+			break;
 		}
 	}
 #ifdef DEBUG
@@ -556,7 +603,7 @@ end:
 
 
 
-unsigned char VM_CODE[] =
+unsigned char VM_CODE_STANDARD[] =
 {
 	PUSHD,  0x00, 0x00, 0x00, 0x2f,
 	POP,    0x30,
@@ -592,6 +639,14 @@ unsigned char VM_CODE[] =
 	END,
 };
 
+unsigned char VM_CODE_TEST_CALL_RET[] = {
+	CALL,1,0,0,0,
+	END,
+	PUSHD,1,2,3,4,
+	POP,0x00,
+	RET
+};
+
 int main(int argc, char *argv[]) {
 	if (argc < 2) {
 		printf("Hello World!\n");
@@ -612,7 +667,7 @@ int main(int argc, char *argv[]) {
 	memcpy(y, argv[1], 50);
 	x->db = y;
 	x->bp = s;
-	x->ip = VM_CODE;
+	x->ip = VM_CODE_TEST_CALL_RET;
 	vm->vm_init(x);
 	vm->vm_run();
 	vm->vm_out(x);
