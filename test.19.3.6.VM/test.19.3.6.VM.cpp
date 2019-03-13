@@ -13,8 +13,10 @@
 #define KEY_LEN 48
 #include <cstdio>
 #include <cstring>
-
-
+#include <string>
+#include <map>
+#include <vector>
+#include <sstream>
 
 
 #define S_SIZE 20
@@ -26,6 +28,56 @@ enum OPCODE
 	END = 0x66, ADD, SUB, MUL, DIV, INC, DEC, XOR, AND, PUSH, PUSHD, POP, MOV, MOVD, MOV2D, LOOP, CMP, JL, JG, JZ, INCD, DECD, FUN,
 	CALL = 0xe8,RET=0xc3
 };
+
+
+
+/*
+ * 虚拟机内存安全管理
+ * 主要做指针范围检查
+ *
+ */
+class VM_Memory_Safe_Manager
+{
+public:
+	void check(const void* p)throw(std::string)
+	{
+		bool find = false;
+		std::string descripttion = "explorer range is unpermit";
+		for (auto element : m_permit_memory)
+		{
+			element.first;
+
+			if(element.second.first<=p&&p<= element.second.second)
+			{
+				descripttion = element.first;
+				find = true;
+			}
+		}
+
+		if(!find)
+		{
+			std::stringstream stream;
+			stream << std::hex << (unsigned int)p;
+			std::string addr(stream.str());
+			throw(descripttion+"access memory:"+ addr);
+		}
+
+	}
+	void Add_Safe_Memory_Section(void* start, void* end,std::string wrong_descripttion = "explorer range is unpermit")throw(std::string)
+	{
+		if(start>end)
+		{
+			throw(std::string("error argv,start>end"));
+		}
+		m_permit_memory.emplace_back(wrong_descripttion,std::make_pair(start,end));
+	}
+private:
+	std::vector<std::pair<std::string,std::pair<void*, void*>>> m_permit_memory;
+
+	
+	
+};
+
 
 struct REG {
 	unsigned int r0;
@@ -42,9 +94,16 @@ struct REG {
 class VM {
 private:
 	struct REG r;
+	// 虚拟机操作 vmp
 	virtual unsigned int vmp_getd();
 	virtual unsigned int vmp_gets();
 	virtual void vmp_setd(unsigned int x);
+	virtual unsigned int vmp_get_dword();
+	virtual unsigned char vmp_get_char();
+private:
+	VM_Memory_Safe_Manager* m_safe;
+protected:
+	// 虚拟机命令 vmc
 	virtual void vmc_nop();
 	virtual void vmc_ud();
 	virtual void vmc_add();
@@ -61,6 +120,10 @@ private:
 	virtual void vmc_mov();
 	virtual void vmc_movd();
 	virtual void vmc_mov2d();
+	virtual void vmc_mov_m2r();
+	virtual void vmc_mov_r2m();
+	virtual void vmc_mov_rm2r();
+	virtual void vmc_mov_r2rm();
 	virtual void vmc_loop();
 	virtual void vmc_cmp();
 	virtual void vmc_jl();
@@ -71,11 +134,13 @@ private:
 	virtual void vmc_fun();
 	virtual void vmc_call();
 	virtual void vmc_ret();
+	virtual void vmc_jmp();
+	virtual void vmc_jmpr();
 public:
 #ifdef DEBUG
 	virtual void vm_debug();
 #endif
-	virtual int vm_init(REG *init);
+	virtual int vm_init(REG *init,VM_Memory_Safe_Manager* p);
 	virtual void vm_out(REG *out) const;
 	virtual void vm_run();
 };
@@ -106,6 +171,10 @@ unsigned int VM::vmp_getd() {
 		return r.r3;
 	case 0x04:
 		return r.cf;
+	case 0x05:
+		return reinterpret_cast<unsigned int>(r.sp);
+	case 0x06:
+		return reinterpret_cast<unsigned int>(r.bp);
 	default:
 		return 0;
 	}
@@ -125,6 +194,10 @@ unsigned int VM::vmp_gets() {
 		return r.r3;
 	case 0x04:
 		return r.cf;
+	case 0x05:
+		return reinterpret_cast<unsigned int>(r.sp);
+	case 0x06:
+		return reinterpret_cast<unsigned int>(r.bp);
 	default:
 		return 0;
 	}
@@ -146,12 +219,39 @@ void VM::vmp_setd(unsigned int x) {
 	case 0x03:
 		r.r3 = x;
 		break;
-		//case 0x04:
-		//r.db = (unsigned char*)x;
+	case 0x04:
+		r.cf = x;
+		break;
+	case 0x05:
+		r.sp = reinterpret_cast<unsigned int*>(x);
+		break;
+	case 0x06:
+		r.bp = reinterpret_cast<unsigned int*>(x);
+		break;
+	default:
+		return;
 	}
 }
+/*
+ * 从命令传中获取dword形立即数
+ */
+unsigned VM::vmp_get_dword()
+{
+	unsigned int  data = *((unsigned int*)(r.ip + 2));
+	return data;
+}
+/*
+ * 从命令串中获取char形立即数
+ */
+unsigned char VM::vmp_get_char()
+{
+	unsigned char  data = *(r.ip + 2);
+	return data;
+}
 
-int VM::vm_init(REG *init) {
+int VM::vm_init(REG *init,VM_Memory_Safe_Manager* p_manager) {
+	m_safe = p_manager;
+
 #ifdef DEBUG
 	printf("%s", "VM::vm_init\n");
 #endif
@@ -272,12 +372,12 @@ void VM::vmc_and() {
  *
  */
 void VM::vmc_push() {
-	unsigned int buf = vmp_getd();
+	unsigned int buf = vmp_gets();
 	r.sp -= 1;
 	*(r.sp) = buf;
 	r.ip += 2;
 #ifdef DEBUG
-	printf("PUSH R%X\n", *(r.ip - 1) >> 4);
+	printf("PUSH R%X\n", *(r.ip-1) & 0x0f);
 	vm_debug();
 #endif
 }
@@ -336,15 +436,81 @@ void VM::vmc_movd() {
 }
 /*
  * 从dest指向寄存器 读数据 -> 写入到db中.
- *
- *
+ * 
+ * 指令排布为:
+ * command dest(高位) source(低位-来源)
  */
 void VM::vmc_mov2d() {
-	unsigned char buf = (unsigned char)vmp_getd();
+	unsigned char buf = (unsigned char)vmp_gets();
 	*(r.db) = buf;
 	r.ip += 2;
 #ifdef DEBUG
 	printf("MOV2D R%X\n", *(r.ip - 1) >> 4);
+	vm_debug();
+#endif
+}
+/* 
+ * mov eax,[0x12345678]
+ * memory -> reg
+ * 
+ * 这里有个设计问题:什么情况下用dword,什么情况下用char
+ *
+ * 这里用的是dword
+ * memory -> reg
+ */
+void VM::vmc_mov_m2r()
+{
+	unsigned int* pbuf =reinterpret_cast<unsigned int*>(vmp_get_dword());
+	unsigned int buf = *pbuf;
+	vmp_setd((unsigned int)buf);
+	r.ip += 6;
+#ifdef DEBUG
+	printf("MOV_M2R [%p]:%X -> R%X\n",pbuf,*pbuf,*(r.ip-5)>>4);
+	vm_debug();
+#endif
+}
+/*
+ * reg -> memory
+ * mov [0x12345678],reg
+ */
+void VM::vmc_mov_r2m()
+{
+	unsigned int* pbuf = reinterpret_cast<unsigned int*>(vmp_get_dword());
+	unsigned int buf = vmp_gets();
+	*pbuf = buf;
+	r.ip += 6;
+#ifdef DEBUG
+	printf("MOV_R2M R%X -> [%p]:\n", *(r.ip - 5) & 0xf, pbuf);
+	vm_debug();
+#endif
+}
+/*
+ * mov eax,[ebx]
+ *
+ *
+ */
+void VM::vmc_mov_rm2r()
+{
+	unsigned int* pbuf = reinterpret_cast<unsigned int*>(vmp_gets());
+	vmp_setd(*pbuf);
+	r.ip += 2;
+#ifdef DEBUG
+	printf("MOV_RM2R [R%X]:%X  -> R%X\n", *(r.ip-1)&0xf,*pbuf,*(r.ip-1)>>4);
+	vm_debug();
+#endif
+}
+/*
+ * mov [ebx],eax
+ *
+ */
+void VM::vmc_mov_r2rm()
+{
+	unsigned int buf = vmp_gets();
+	unsigned int* pbuf = reinterpret_cast<unsigned int*>(vmp_getd());
+	*pbuf = buf;
+	r.ip += 2;
+#ifdef DEBUG
+	printf("MOV_R2RM R%X  -> [R%X]:%p\n", *(r.ip - 1) & 0xf,*(r.ip - 1) >> 4,pbuf);
 	vm_debug();
 #endif
 }
@@ -479,6 +645,10 @@ void VM::vmc_call()
 
 	/*
 		解释,call后面是一个偏移 ,偏移的起始地址是当前call范围内	
+
+	call 0x00 0x00 0x00 dword
+	新设计好像很冗余的样子.本来call只是一个E8而已，如果支持call寄存器可能要复杂一点
+
 	*/
 	int i = (*(int*)(r.ip + 1));
 	r.ip = i + 5 + r.ip;
@@ -495,6 +665,25 @@ void VM::vmc_ret()
 	printf("RET ->0x%p\n",r.ip);
 	vm_debug();
 #endif
+}
+/*
+ * jmp offset
+ */
+void VM::vmc_jmp()//?未测
+{
+	int i = (*(int*)(r.ip + 1));
+	r.ip = i + 5 + r.ip;
+#ifdef DEBUG
+	printf("JMP  +%X\n", i);
+	vm_debug();
+#endif	
+}
+/*
+ * jmp eax
+ */
+void VM::vmc_jmpr()
+{
+	throw("UV");
 }
 
 
@@ -668,15 +857,17 @@ int main(int argc, char *argv[]) {
 	x->db = y;
 	x->bp = s;
 	x->ip = VM_CODE_TEST_CALL_RET;
-	vm->vm_init(x);
+	VM_Memory_Safe_Manager* manger=new VM_Memory_Safe_Manager();
+	manger->Add_Safe_Memory_Section(y,y+D_SIZE);
+	manger->Add_Safe_Memory_Section(s, s + S_SIZE);
+	manger->Add_Safe_Memory_Section(x->ip, x->ip + sizeof(VM_CODE_TEST_CALL_RET));
+	vm->vm_init(x,manger);
 	vm->vm_run();
 	vm->vm_out(x);
-	if (x->r0 == 1) {
-		printf("0x2F bytes user-input is hexadecimal number \n");
-	}
-	else {
-		printf("bad char exists or less than 0x2F bytes \n");
-	}
+	printf("result:%x \n", x->r0);
+	
+	delete(manger);
+
 	delete[] s;
 	delete[] y;
 	delete x;
